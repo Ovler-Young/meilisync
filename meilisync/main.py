@@ -85,9 +85,37 @@ def start(
         nonlocal current_progress
         for sync in settings.sync:
             if sync.full and not await meili.index_exists(sync.index_name):
+                # get source_count = await source.get_count(sync)
+                logger.info(f'Start full sync data from "{settings.source.type}" to MeiliSearch...')
+                source_count = await source.get_count(sync)
+                if source_count == 0:
+                    logger.info(
+                        f'No data found for table "{settings.source.database}.{sync.table}".'
+                    )
+                    continue
+                logger.info(f'Source count: {source_count}')
+
+                logger.info(f'Creating index "{sync.index_name}" with empty attribute settings...')
+                index = await meili.client.create_index(sync.index_name, primary_key=sync.pk)
+                settings_obj = await index.get_settings()
+                settings_obj.searchable_attributes = []
+                settings_obj.sortable_attributes = []
+                settings_obj.filterable_attributes = []
+                task = await index.update_settings(settings_obj)
+                await meili.client.wait_for_task(
+                    task_id=task.task_uid, timeout_in_ms=meili.wait_for_task_timeout
+                )
+                logger.info(f'Index "{sync.index_name}" created with empty attribute settings')
+
                 count = 0
-                async for items in source.get_full_data(sync, meili_settings.insert_size or 10000):
+                batch = 0
+                batch_size = meili_settings.insert_size or 10000
+                target_batch_count = source_count // batch_size + 1
+                logger.info(f"Target batch count: {target_batch_count}")
+                async for items in source.get_full_data(sync, batch_size):
                     count += len(items)
+                    batch += 1
+                    logger.debug(f"Batch {batch}/{target_batch_count} sending...")
                     await meili.add_data(sync, items)
                 if count:
                     logger.info(

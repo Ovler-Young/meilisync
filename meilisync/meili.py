@@ -35,18 +35,26 @@ class Meili:
         index = sync.index_name
         pk = sync.pk
         sync.index = index_name_tmp = f"{index}_tmp"
+        logger.info(f"Starting to delete index {index_name_tmp}...")
         try:
             await self.client.index(index_name_tmp).delete()
         except MeilisearchApiError as e:
             if e.code != "MeilisearchApiError.index_not_found":
                 raise
+        logger.info(f"Delete index {index_name_tmp} complete")
+        logger.info(f"Starting to create index {index_name_tmp}...")
         settings = await self.client.index(index).get_settings()
         index_tmp = await self.client.create_index(index_name_tmp, primary_key=pk)
+        settings.searchable_attributes = []
+        settings.sortable_attributes = []
+        settings.filterable_attributes = []
         task = await index_tmp.update_settings(settings)
         logger.info(f"Waiting for update tmp index {index_name_tmp} settings to complete...")
         await self.client.wait_for_task(
             task_id=task.task_uid, timeout_in_ms=self.wait_for_task_timeout
         )
+        logger.info(f"Create index {index_name_tmp} complete")
+        logger.info(f"Starting to add data to index {index_name_tmp}...")
         tasks = []
         count = 0
         async for items in data:
