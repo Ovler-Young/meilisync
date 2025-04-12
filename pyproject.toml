@@ -38,8 +38,8 @@ types-pyyaml = "*"
 types-redis = "*"
 
 [tool.poetry.extras]
-all = ["asyncmy", "redis", "psycopg2-binary", "motor", "sentry-sdk"]
-mongodb = ["motor"]
+all = ["asyncmy", "redis", "psycopg2-binary", "motor", "sentry-sdk", "bson"]
+mongodb = ["motor", "bson"]
 mysql = ["asyncmy"]
 postgres = ["psycopg2-binary"]
 redis = ["redis"]

@@ -1,4 +1,7 @@
 from typing import List
+from bson import ObjectId
+from datetime import datetime, date
+from decimal import Decimal
 
 import motor.motor_asyncio
 
@@ -6,6 +9,28 @@ from meilisync.enums import EventType, SourceType
 from meilisync.schemas import Event
 from meilisync.settings import Sync
 from meilisync.source import Source
+
+
+def convert_jsonable(obj):
+    """Recursively convert MongoDB objects to JSON-serializable types.
+    - ObjectId -> string
+    - datetime -> integer timestamp
+    - date -> string
+    - Decimal -> float
+    """
+    if isinstance(obj, ObjectId):
+        return str(obj)
+    elif isinstance(obj, datetime):
+        return int(obj.timestamp())
+    elif isinstance(obj, date):
+        return str(obj)
+    elif isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, list):
+        return [convert_jsonable(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {key: convert_jsonable(value) for key, value in obj.items()}
+    return obj
 
 
 class Mongo(Source):
@@ -26,7 +51,7 @@ class Mongo(Source):
         cursor = collection.find({}, fields)
         ret = []
         async for doc in cursor:
-            doc["_id"] = str(doc["_id"])
+            doc = convert_jsonable(doc)  # Convert all ObjectId objects to strings
             ret.append(doc)
             if len(ret) == size:
                 yield ret
@@ -44,7 +69,8 @@ class Mongo(Source):
     async def get_current_progress(self):
         pipeline = [{"$match": {"operationType": {"$in": ["insert", "update", "delete"]}}}]
         async with self.db.watch(pipeline) as stream:
-            return {"resume_token": stream.resume_token}
+            raw_token = stream.resume_token
+            return {"resume_token": convert_jsonable(raw_token)}
 
     async def __aiter__(self):
         pipeline = [{"$match": {"operationType": {"$in": ["insert", "update", "delete"]}}}]
@@ -54,7 +80,7 @@ class Mongo(Source):
             resume_token = None
         async with self.db.watch(pipeline, resume_after=resume_token) as stream:
             async for change in stream:
-                resume_token = stream.resume_token
+                resume_token = convert_jsonable(stream.resume_token)
                 operation_type = change["operationType"]
                 if operation_type == "insert":
                     event_type = EventType.create
@@ -65,7 +91,7 @@ class Mongo(Source):
                 elif operation_type == "delete":
                     event_type = EventType.delete
                     data = change["documentKey"]
-                data["_id"] = str(change["documentKey"]["_id"])
+                data = convert_jsonable(data) 
                 yield Event(
                     type=event_type,
                     table=change["ns"]["coll"],
