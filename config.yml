@@ -22,6 +22,9 @@ sync:
     fields:
       id:
       age:
+    attributes:
+      id: [filterable]
+      age: [filterable, sortable]
 sentry:
   dsn: ''
   environment: 'production'

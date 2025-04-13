@@ -69,6 +69,22 @@ class Meili:
         ]
         logger.info(f"Waiting for insert tmp index {index_name_tmp} to complete...")
         await asyncio.gather(*wait_tasks)
+
+        if sync.attributes:
+            logger.info(f"Updating index {index_name_tmp} settings with indexing configuration...")
+            index_tmp_obj = self.client.index(index_name_tmp)
+            settings_obj = await index_tmp_obj.get_settings()
+            index_attrs = sync.index_attributes
+            settings_obj.searchable_attributes = index_attrs["searchable"]
+            settings_obj.sortable_attributes = index_attrs["sortable"]
+            settings_obj.filterable_attributes = index_attrs["filterable"]
+            task = await index_tmp_obj.update_settings(settings_obj)
+            logger.info(f"Waiting for update index {index_name_tmp} settings to complete...")
+            await self.client.wait_for_task(
+                task_id=task.task_uid, timeout_in_ms=self.wait_for_task_timeout
+            )
+            logger.info(f"Index settings for {index_name_tmp} updated successfully")
+
         task = await self.client.swap_indexes([(index, index_name_tmp)])
         logger.info(f"Waiting for swap index {index} to complete...")
         await self.client.wait_for_task(

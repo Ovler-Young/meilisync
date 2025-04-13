@@ -127,6 +127,11 @@ sync:
       title:
       description:
       category:
+    attributes:
+      id: [filterable]
+      title: [searchable]
+      description: [searchable]
+      category: [filterable, searchable]
   - table: picture
     index: beauty-pictures
     full: true
@@ -134,6 +139,12 @@ sync:
       id:
       description:
       category:
+      created_at:
+    attributes:
+      id: [filterable]
+      description: [searchable]
+      category: [filterable, searchable]
+      created_at: [filterable, sortable]
 sentry:
   dsn: ""
   environment: "production"
@@ -210,6 +221,12 @@ The sync configuration, you can add multiple sync tasks.
 - `fields`: the fields to sync, if not set, it will sync all fields. The key is table field name, the value is the
   Meilisearch field name, if not set, it will use the table field name.
 - `plugins`: the table level plugins, optional.
+- `attributes`: configure which fields should be indexed and how. Each field can have one or more of the following attributes:
+  - `searchable`: Field can be searched for text matches
+  - `filterable`: Field can be used in filters
+  - `sortable`: Field can be used for sorting results
+
+  If no `attributes` is provided, no fields will be indexed afte initial data loading or refresh. Index settings are applied after all data has been loaded.
 
 ### sentry (optional)
 

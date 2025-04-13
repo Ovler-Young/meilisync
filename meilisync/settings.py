@@ -1,9 +1,9 @@
-from typing import List
+from typing import Dict, List
 
 from pydantic import BaseModel, Extra
 from pydantic_settings import BaseSettings
 
-from meilisync.enums import ProgressType, SourceType
+from meilisync.enums import IndexType, ProgressType, SourceType
 from meilisync.plugin import load_plugin
 
 
@@ -42,10 +42,38 @@ class Sync(BasePlugin):
     full: bool = False
     index: str | None = None
     fields: dict | None = None
+    attributes: Dict[str, List[IndexType]] | None = None
 
     @property
     def index_name(self):
         return self.index or self.table
+        
+    @property
+    def index_attributes(self) -> Dict[str, List[str]]:
+        """Get a dictionary of index attribute types and their corresponding fields.
+        
+        Returns:
+            Dict[str, List[str]]: Dictionary with keys 'searchable', 'sortable', 'filterable'
+                                  and values as lists of field names with those attributes.
+        """
+        result = {
+            "searchable": [],
+            "sortable": [],
+            "filterable": []
+        }
+        
+        if not self.attributes:
+            return result
+            
+        for field, types in self.attributes.items():
+            if IndexType.searchable in types:
+                result["searchable"].append(field)
+            if IndexType.sortable in types:
+                result["sortable"].append(field)
+            if IndexType.filterable in types:
+                result["filterable"].append(field)
+                
+        return result
 
     def __hash__(self):
         return hash(self.table)

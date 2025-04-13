@@ -16,3 +16,9 @@ class SourceType(str, Enum):
 class ProgressType(str, Enum):
     file = "file"
     redis = "redis"
+
+
+class IndexType(str, Enum):
+    searchable = "searchable"
+    sortable = "sortable"
+    filterable = "filterable"
