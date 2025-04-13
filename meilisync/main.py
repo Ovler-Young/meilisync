@@ -95,17 +95,19 @@ def start(
                     continue
                 logger.info(f'Source count: {source_count}')
 
-                logger.info(f'Creating index "{sync.index_name}" with empty attribute settings...')
                 index = await meili.client.create_index(sync.index_name, primary_key=sync.pk)
-                settings_obj = await index.get_settings()
-                settings_obj.searchable_attributes = []
-                settings_obj.sortable_attributes = []
-                settings_obj.filterable_attributes = []
-                task = await index.update_settings(settings_obj)
-                await meili.client.wait_for_task(
-                    task_id=task.task_uid, timeout_in_ms=meili.wait_for_task_timeout
-                )
-                logger.info(f'Index "{sync.index_name}" created with empty attribute settings')
+                if sync.attributes:
+                    logger.info(f'Updating index "{sync.index_name}" settings with indexing configuration...')
+                    settings_obj = await index.get_settings()
+                    index_attrs = sync.index_attributes
+                    settings_obj.searchable_attributes = index_attrs["searchable"]
+                    settings_obj.sortable_attributes = index_attrs["sortable"]
+                    settings_obj.filterable_attributes = index_attrs["filterable"]
+                    task = await index.update_settings(settings_obj)
+                    await meili.client.wait_for_task(
+                        task_id=task.task_uid, timeout_in_ms=meili.wait_for_task_timeout
+                    )
+                    logger.info(f'Index settings for "{sync.index_name}" updated successfully')
 
                 count = 0
                 batch = 0
@@ -122,20 +124,6 @@ def start(
                         f'Full data sync for table "{settings.source.database}.{sync.table}" '
                         f"done! {count} documents added."
                     )
-
-                    if sync.attributes:
-                        logger.info(f'Updating index "{sync.index_name}" settings with indexing configuration...')
-                        index = meili.client.index(sync.index_name)
-                        settings_obj = await index.get_settings()
-                        index_attrs = sync.index_attributes
-                        settings_obj.searchable_attributes = index_attrs["searchable"]
-                        settings_obj.sortable_attributes = index_attrs["sortable"]
-                        settings_obj.filterable_attributes = index_attrs["filterable"]
-                        task = await index.update_settings(settings_obj)
-                        await meili.client.wait_for_task(
-                            task_id=task.task_uid, timeout_in_ms=meili.wait_for_task_timeout
-                        )
-                        logger.info(f'Index settings for "{sync.index_name}" updated successfully')
                 else:
                     logger.info(
                         f'No data found for table "{settings.source.database}.{sync.table}".'
