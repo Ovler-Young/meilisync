@@ -157,7 +157,8 @@ def start(
             try:
                 async with lock:
                     await meili.handle_events(collection)
-                    await progress.set(**current_progress)
+                    if current_progress is not None:
+                        await progress.set(**current_progress)
             except Exception as e:
                 logger.exception(e)
                 logger.error(f"Error when insert data to MeiliSearch: {e}")
