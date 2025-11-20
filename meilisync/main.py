@@ -93,11 +93,13 @@ def start(
                         f'No data found for table "{settings.source.database}.{sync.table}".'
                     )
                     continue
-                logger.info(f'Source count: {source_count}')
+                logger.info(f"Source count: {source_count}")
 
                 index = await meili.client.create_index(sync.index_name, primary_key=sync.pk)
                 if sync.attributes:
-                    logger.info(f'Updating index "{sync.index_name}" settings with indexing configuration...')
+                    logger.info(
+                        f'Updating index "{sync.index_name}" settings with indexing configuration...'
+                    )
                     settings_obj = await index.get_settings()
                     index_attrs = sync.index_attributes
                     settings_obj.searchable_attributes = index_attrs["searchable"]
@@ -186,23 +188,31 @@ def refresh(
         source = context.obj["source"]
         meili = context.obj["meili"]
         progress = context.obj["progress"]
-        for sync in settings.sync:
-            if not table or sync.table in table:
-                current_progress = await source.get_current_progress()
-                await progress.set(**current_progress)
-                count = await meili.refresh_data(
-                    sync,
-                    source.get_full_data(sync, size),
-                )
-                if count:
-                    logger.info(
-                        f'Full data sync for table "{settings.source.database}.{sync.table}" '
-                        f"done! {count} documents added."
+        meili_settings = settings.meilisearch
+        collection = EventCollection()
+
+        async with source:
+            for sync in settings.sync:
+                if not table or sync.table in table:
+                    current_progress = await source.get_current_progress()
+                    await progress.set(**current_progress)
+                    count = await meili.refresh_data(
+                        sync,
+                        source.get_full_data(sync, size),
+                        source=source,
+                        collection=collection,
+                        meili_settings=meili_settings,
+                        progress=progress,
                     )
-                else:
-                    logger.info(
-                        f'No data found for table "{settings.source.database}.{sync.table}".'
-                    )
+                    if count:
+                        logger.info(
+                            f'Full data sync for table "{settings.source.database}.{sync.table}" '
+                            f"done! {count} documents added."
+                        )
+                    else:
+                        logger.info(
+                            f'No data found for table "{settings.source.database}.{sync.table}".'
+                        )
 
     asyncio.run(_())
 

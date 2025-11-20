@@ -31,10 +31,18 @@ class Meili:
         events = [Event(type=EventType.create, data=item) for item in data]
         return await self.handle_events_by_type(sync, events, EventType.create)
 
-    async def refresh_data(self, sync: Sync, data: AsyncGenerator):
+    async def refresh_data(
+        self,
+        sync: Sync,
+        data: AsyncGenerator,
+        source=None,
+        collection=None,
+        meili_settings=None,
+        progress=None,
+    ):
         index = sync.index_name
         pk = sync.pk
-        sync.index = index_name_tmp = f"{index}_tmp"
+        sync.index_name = index_name_tmp = f"{index}_tmp"
         logger.info(f"Starting to delete index {index_name_tmp}...")
         try:
             await self.client.index(index_name_tmp).delete()
@@ -72,8 +80,62 @@ class Meili:
 
         wait_tasks = [wait_with_sem(item.task_uid) for item in tasks]
         logger.info(f"Waiting for insert tmp index {index_name_tmp} to complete...")
-        await asyncio.gather(*wait_tasks)
 
+        # If source stream is provided, process events concurrently while waiting for tasks
+        if source is not None and collection is not None and meili_settings is not None:
+            current_progress = {}
+            lock = asyncio.Lock()
+            all_tasks_done = False
+
+            async def wait_for_all_tasks():
+                nonlocal all_tasks_done
+                await asyncio.gather(*wait_tasks)
+                all_tasks_done = True
+                logger.info(f"All insert tasks for tmp index {index_name_tmp} complete")
+
+            async def process_events():
+                nonlocal current_progress
+                logger.info(f"Starting to process new events for tmp index {index_name_tmp}...")
+                async for event in source:
+                    if all_tasks_done:
+                        logger.info(f"All tasks done, stopping event processing for tmp index")
+                        break
+                    current_progress = event.progress
+                    if isinstance(event, Event):
+                        # Only process events for this sync
+                        event_sync = event.table == sync.table
+                        if not event_sync:
+                            continue
+                        if not meili_settings.insert_size and not meili_settings.insert_interval:
+                            await self.handle_event(event, sync)
+                            if progress:
+                                await progress.set(**current_progress)
+                        else:
+                            collection.add_event(sync, event)
+                            if collection.size >= meili_settings.insert_size:
+                                async with lock:
+                                    await self.handle_events(collection)
+                                    if progress:
+                                        await progress.set(**current_progress)
+                    else:
+                        if progress:
+                            await progress.set(**current_progress)
+
+            # Run both tasks concurrently, but prioritize waiting for all tasks
+            await asyncio.gather(wait_for_all_tasks(), process_events())
+
+            # Process any remaining events in the collection
+            if collection.size > 0:
+                async with lock:
+                    await self.handle_events(collection)
+                    if progress and current_progress:
+                        await progress.set(**current_progress)
+        else:
+            # Original behavior: just wait for all tasks
+            await asyncio.gather(*wait_tasks)
+
+        # Restore original index name before swapping
+        sync.index_name = index
         task = await self.client.swap_indexes([(index, index_name_tmp)])
         logger.info(f"Waiting for swap index {index} to complete...")
         await self.client.wait_for_task(
