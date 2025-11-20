@@ -32,6 +32,26 @@ class Meili:
         events = [Event(type=EventType.create, data=item) for item in data]
         return await self.handle_events_by_type(sync, events, EventType.create)
 
+    async def add_data_to_temp_index(
+        self, index_name: str, pk: str, data: list, fields: dict = None
+    ):
+        """Add data directly to a specified index without using sync object."""
+        index = self.client.index(index_name)
+        # Apply field mapping if provided (similar to Event.mapping_data behavior)
+        if fields is not None:
+            documents = []
+            for item in data:
+                mapped_item = {}
+                for k, v in item.items():
+                    if k in fields:
+                        real_k = fields[k] or k
+                        mapped_item[real_k] = v
+                documents.append(mapped_item if mapped_item else item)
+        else:
+            documents = data
+        task = await index.add_documents(documents, primary_key=pk)
+        return task
+
     async def refresh_data(
         self,
         sync: Sync,
@@ -43,7 +63,7 @@ class Meili:
     ):
         index = sync.index_name
         pk = sync.pk
-        sync.index_name = index_name_tmp = f"{index}_tmp"
+        index_name_tmp = f"{index}_tmp"
         logger.info(f"Starting to delete index {index_name_tmp}...")
         try:
             await self.client.index(index_name_tmp).delete()
@@ -68,7 +88,7 @@ class Meili:
             batch += 1
             count += len(items)
             logger.debug(f"Batch {batch} sending...")
-            task = await self.add_data(sync, items)
+            task = await self.add_data_to_temp_index(index_name_tmp, pk, items, sync.fields)
             tasks.append(task)
 
         sem = asyncio.Semaphore(3)
@@ -145,8 +165,7 @@ class Meili:
             # Original behavior: just wait for all tasks
             await asyncio.gather(*wait_tasks)
 
-        # Restore original index name before swapping
-        sync.index_name = index
+        # Swap the temporary index with the original index
         task = await self.client.swap_indexes([(index, index_name_tmp)])
         logger.info(f"Waiting for swap index {index} to complete...")
         await self.client.wait_for_task(
