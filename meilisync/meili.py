@@ -20,6 +20,7 @@ class Meili:
         api_key: str,
         plugins: Optional[List[Union[Type[Plugin], Plugin]]] = None,
         wait_for_task_timeout: Optional[int] = None,
+        wait_for_task_interval: int = 500,
     ):
         self.client = AsyncClient(
             api_url,
@@ -27,6 +28,7 @@ class Meili:
         )
         self.plugins = plugins or []
         self.wait_for_task_timeout = wait_for_task_timeout
+        self.wait_for_task_interval = wait_for_task_interval
 
     async def add_data(self, sync: Sync, data: list):
         events = [Event(type=EventType.create, data=item) for item in data]
@@ -77,7 +79,9 @@ class Meili:
         task = await index_tmp.update_settings(settings)
         logger.info(f"Waiting for update tmp index {index_name_tmp} settings to complete...")
         await self.client.wait_for_task(
-            task_id=task.task_uid, timeout_in_ms=self.wait_for_task_timeout
+            task_id=task.task_uid,
+            timeout_in_ms=self.wait_for_task_timeout,
+            interval_in_ms=self.wait_for_task_interval,
         )
         logger.info(f"Create index {index_name_tmp} complete")
         logger.info(f"Starting to add data to index {index_name_tmp}...")
@@ -98,7 +102,9 @@ class Meili:
                 while True:
                     try:
                         await self.client.wait_for_task(
-                            task_id=task_uid, timeout_in_ms=self.wait_for_task_timeout
+                            task_id=task_uid,
+                            timeout_in_ms=self.wait_for_task_timeout,
+                            interval_in_ms=self.wait_for_task_interval,
                         )
                         break  # Task completed successfully
                     except httpx.HTTPStatusError as e:
@@ -169,7 +175,9 @@ class Meili:
         task = await self.client.swap_indexes([(index, index_name_tmp)])
         logger.info(f"Waiting for swap index {index} to complete...")
         await self.client.wait_for_task(
-            task_id=task.task_uid, timeout_in_ms=self.wait_for_task_timeout
+            task_id=task.task_uid,
+            timeout_in_ms=self.wait_for_task_timeout,
+            interval_in_ms=self.wait_for_task_interval,
         )
         await self.client.index(index_name_tmp).delete()
         logger.success(f"Swap index {index} complete")

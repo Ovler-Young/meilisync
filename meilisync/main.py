@@ -53,7 +53,13 @@ def callback(
             **settings.source.model_dump(exclude={"type"}),
         )
         meilisearch = settings.meilisearch
-        meili = Meili(meilisearch.api_url, meilisearch.api_key, settings.plugins_cls())
+        meili = Meili(
+            meilisearch.api_url,
+            meilisearch.api_key,
+            settings.plugins_cls(),
+            wait_for_task_timeout=meilisearch.wait_for_task_timeout,
+            wait_for_task_interval=meilisearch.wait_for_task_interval,
+        )
         context.obj["current_progress"] = current_progress
         context.obj["source"] = source
         context.obj["meili"] = meili
@@ -107,7 +113,9 @@ def start(
                     settings_obj.filterable_attributes = index_attrs["filterable"]
                     task = await index.update_settings(settings_obj)
                     await meili.client.wait_for_task(
-                        task_id=task.task_uid, timeout_in_ms=meili.wait_for_task_timeout
+                        task_id=task.task_uid,
+                        timeout_in_ms=meili.wait_for_task_timeout,
+                        interval_in_ms=meili.wait_for_task_interval,
                     )
                     logger.info(f'Index settings for "{sync.index_name}" updated successfully')
 

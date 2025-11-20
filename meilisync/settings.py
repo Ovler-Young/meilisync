@@ -20,6 +20,8 @@ class MeiliSearch(BaseModel):
     api_key: str | None = None
     insert_size: int | None = None
     insert_interval: int | None = None
+    wait_for_task_timeout: int | None = None
+    wait_for_task_interval: int = 500
 
 
 class BasePlugin(BaseModel):
@@ -47,24 +49,20 @@ class Sync(BasePlugin):
     @property
     def index_name(self):
         return self.index or self.table
-        
+
     @property
     def index_attributes(self) -> Dict[str, List[str]]:
         """Get a dictionary of index attribute types and their corresponding fields.
-        
+
         Returns:
             Dict[str, List[str]]: Dictionary with keys 'searchable', 'sortable', 'filterable'
                                   and values as lists of field names with those attributes.
         """
-        result = {
-            "searchable": [],
-            "sortable": [],
-            "filterable": []
-        }
-        
+        result = {"searchable": [], "sortable": [], "filterable": []}
+
         if not self.attributes:
             return result
-            
+
         for field, types in self.attributes.items():
             if IndexType.searchable in types:
                 result["searchable"].append(field)
@@ -72,7 +70,7 @@ class Sync(BasePlugin):
                 result["sortable"].append(field)
             if IndexType.filterable in types:
                 result["filterable"].append(field)
-                
+
         return result
 
     def __hash__(self):
