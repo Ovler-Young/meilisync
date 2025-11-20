@@ -61,12 +61,16 @@ class Meili:
             logger.debug(f"Batch {batch} sending...")
             task = await self.add_data(sync, items)
             tasks.append(task)
-        wait_tasks = [
-            self.client.wait_for_task(
-                task_id=item.task_uid, timeout_in_ms=self.wait_for_task_timeout
-            )
-            for item in tasks
-        ]
+
+        sem = asyncio.Semaphore(3)
+
+        async def wait_with_sem(task_uid):
+            async with sem:
+                await self.client.wait_for_task(
+                    task_id=task_uid, timeout_in_ms=self.wait_for_task_timeout
+                )
+
+        wait_tasks = [wait_with_sem(item.task_uid) for item in tasks]
         logger.info(f"Waiting for insert tmp index {index_name_tmp} to complete...")
         await asyncio.gather(*wait_tasks)
 
