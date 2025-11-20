@@ -52,15 +52,15 @@ class Meili:
         )
         logger.info(f"Create index {index_name_tmp} complete")
         logger.info(f"Starting to add data to index {index_name_tmp}...")
-        tasks = []
+        tasks = [task]
         count = 0
         batch = 0
         async for items in data:
-            tasks.append(task)
             batch += 1
             count += len(items)
             logger.debug(f"Batch {batch} sending...")
             task = await self.add_data(sync, items)
+            tasks.append(task)
         wait_tasks = [
             self.client.wait_for_task(
                 task_id=item.task_uid, timeout_in_ms=self.wait_for_task_timeout
