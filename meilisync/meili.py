@@ -1,6 +1,7 @@
 import asyncio
 from typing import AsyncGenerator, List, Optional, Type, Union
 
+import httpx
 from loguru import logger
 from meilisearch_python_sdk import AsyncClient
 from meilisearch_python_sdk.errors import MeilisearchApiError
@@ -74,9 +75,19 @@ class Meili:
 
         async def wait_with_sem(task_uid):
             async with sem:
-                await self.client.wait_for_task(
-                    task_id=task_uid, timeout_in_ms=self.wait_for_task_timeout
-                )
+                while True:
+                    try:
+                        await self.client.wait_for_task(
+                            task_id=task_uid, timeout_in_ms=self.wait_for_task_timeout
+                        )
+                        break  # Task completed successfully
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code == 408:
+                            # Request timeout means task is still running, continue waiting
+                            logger.debug(f"Task {task_uid} timeout (408), retrying wait...")
+                            await asyncio.sleep(1)  # Brief pause before retry
+                            continue
+                        raise  # Re-raise other HTTP errors
 
         wait_tasks = [wait_with_sem(item.task_uid) for item in tasks]
         logger.info(f"Waiting for insert tmp index {index_name_tmp} to complete...")
