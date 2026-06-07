@@ -58,7 +58,7 @@ class Sync(BasePlugin):
             Dict[str, List[str]]: Dictionary with keys 'searchable', 'sortable', 'filterable'
                                   and values as lists of field names with those attributes.
         """
-        result = {"searchable": [], "sortable": [], "filterable": []}
+        result: Dict[str, List[str]] = {"searchable": [], "sortable": [], "filterable": []}
 
         if not self.attributes:
             return result

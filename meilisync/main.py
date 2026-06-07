@@ -148,13 +148,15 @@ def start(
                 if not sync:
                     continue
                 if not meili_settings.insert_size and not meili_settings.insert_interval:
-                    await meili.handle_event(event, sync)
+                    task = await meili.handle_event(event, sync)
+                    await meili.wait_for_tasks([task])
                     await progress.set(**current_progress)
                 else:
                     collection.add_event(sync, event)
-                    if collection.size >= meili_settings.insert_size:
+                    if meili_settings.insert_size and collection.size >= meili_settings.insert_size:
                         async with lock:
-                            await meili.handle_events(collection)
+                            tasks = await meili.handle_events(collection)
+                            await meili.wait_for_tasks(tasks)
                             await progress.set(**current_progress)
             else:
                 await progress.set(**current_progress)
@@ -166,7 +168,8 @@ def start(
             await asyncio.sleep(settings.meilisearch.insert_interval)
             try:
                 async with lock:
-                    await meili.handle_events(collection)
+                    tasks = await meili.handle_events(collection)
+                    await meili.wait_for_tasks(tasks)
                     if current_progress is not None:
                         await progress.set(**current_progress)
             except Exception as e:
@@ -197,31 +200,35 @@ def refresh(
         meili = context.obj["meili"]
         progress = context.obj["progress"]
         meili_settings = settings.meilisearch
-        collection = EventCollection()
 
-        async with source:
-            for sync in settings.sync:
-                if not table or sync.table in table:
-                    current_progress = await source.get_current_progress()
-                    await progress.set(**current_progress)
-                    source.set_progress(current_progress)
+        for sync in settings.sync:
+            if not table or sync.table in table:
+                current_progress = await source.get_current_progress()
+                refresh_source = get_source(settings.source.type)(
+                    progress=current_progress,
+                    tables=[sync.table],
+                    **settings.source.model_dump(exclude={"type"}),
+                )
+                collection = EventCollection()
+                async with refresh_source:
                     count = await meili.refresh_data(
                         sync,
-                        source.get_full_data(sync, size),
-                        source=source,
+                        refresh_source.get_full_data(sync, size),
+                        source=refresh_source,
                         collection=collection,
                         meili_settings=meili_settings,
                         progress=progress,
+                        initial_progress=current_progress,
                     )
-                    if count:
-                        logger.info(
-                            f'Full data sync for table "{settings.source.database}.{sync.table}" '
-                            f"done! {count} documents added."
-                        )
-                    else:
-                        logger.info(
-                            f'No data found for table "{settings.source.database}.{sync.table}".'
-                        )
+                if count:
+                    logger.info(
+                        f'Full data sync for table "{settings.source.database}.{sync.table}" '
+                        f"done! {count} documents added."
+                    )
+                else:
+                    logger.info(
+                        f'No data found for table "{settings.source.database}.{sync.table}".'
+                    )
 
     asyncio.run(_())
 

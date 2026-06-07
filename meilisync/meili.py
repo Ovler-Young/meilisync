@@ -35,25 +35,25 @@ class Meili:
         events = [Event(type=EventType.create, data=item) for item in data]
         return await self.handle_events_by_type(sync, events, EventType.create)
 
-    async def add_data_to_index(self, index_name: str, pk: str, data: list, fields: dict = None):
+    async def add_data_to_index(
+        self, index_name: str, pk: str, data: list, fields: dict | None = None
+    ):
         index = self.client.index(index_name)
-        documents = [
-            Event(type=EventType.create, data=item).mapping_data(fields)
-            for item in data
-        ]
+        documents = [Event(type=EventType.create, data=item).mapping_data(fields) for item in data]
         task = await index.add_documents(documents, primary_key=pk)
         return task
 
-    async def handle_events_by_type_for_index(
+    async def handle_events_by_type(
         self,
-        index_name: str,
         sync: Sync,
         events: List[Event],
         event_type: EventType,
+        index_name: str | None = None,
     ):
         if not events:
             return
 
+        index_name = index_name or sync.index_name
         index = self.client.index(index_name)
         for event in events:
             await self.handle_plugins_pre(sync, event)
@@ -74,32 +74,14 @@ class Meili:
             await self.handle_plugins_post(sync, event)
         return task
 
-    async def handle_events_for_index(self, index_name: str, collection: EventCollection):
-        tasks = []
-        created_events, updated_events, deleted_events = collection.pop_events
-        for sync, events in created_events.items():
-            task = await self.handle_events_by_type_for_index(
-                index_name, sync, events, EventType.create
-            )
-            if task:
-                tasks.append(task)
-        for sync, events in updated_events.items():
-            task = await self.handle_events_by_type_for_index(
-                index_name, sync, events, EventType.update
-            )
-            if task:
-                tasks.append(task)
-        for sync, events in deleted_events.items():
-            task = await self.handle_events_by_type_for_index(
-                index_name, sync, events, EventType.delete
-            )
-            if task:
-                tasks.append(task)
-        return tasks
-
-    async def handle_event_for_index(self, index_name: str, event: Event, sync: Sync):
+    async def handle_event(
+        self,
+        event: Event,
+        sync: Sync,
+        index_name: str | None = None,
+    ):
         event = await self.handle_plugins_pre(sync, event)
-        index = self.client.index(index_name)
+        index = self.client.index(index_name or sync.index_name)
         if event.type == EventType.create:
             task = await index.add_documents([event.mapping_data(sync.fields)], primary_key=sync.pk)
         elif event.type == EventType.update:
@@ -112,6 +94,14 @@ class Meili:
             task = None
         await self.handle_plugins_post(sync, event)
         return task
+
+    async def handle_events(self, collection: EventCollection, index_name: str | None = None):
+        tasks = []
+        for sync, event in collection.pop_ordered_events:
+            task = await self.handle_event(event, sync, index_name=index_name)
+            if task:
+                tasks.append(task)
+        return tasks
 
     async def wait_for_task_with_retry(self, task_uid):
         while True:
@@ -129,6 +119,15 @@ class Meili:
                     continue
                 raise
 
+    async def wait_for_tasks(self, tasks: list, concurrency: int = 3):
+        sem = asyncio.Semaphore(concurrency)
+
+        async def wait_with_sem(task_uid):
+            async with sem:
+                await self.wait_for_task_with_retry(task_uid)
+
+        await asyncio.gather(*(wait_with_sem(task.task_uid) for task in tasks if task))
+
     async def refresh_data(
         self,
         sync: Sync,
@@ -137,13 +136,15 @@ class Meili:
         collection=None,
         meili_settings=None,
         progress=None,
+        initial_progress=None,
     ):
         index = sync.index_name
         pk = sync.pk
         index_name_tmp = f"{index}_tmp"
         logger.info(f"Starting to delete index {index_name_tmp}...")
         try:
-            await self.client.index(index_name_tmp).delete()
+            task = await self.client.index(index_name_tmp).delete()
+            await self.wait_for_task_with_retry(task.task_uid)
         except MeilisearchApiError as e:
             if e.code != "MeilisearchApiError.index_not_found":
                 raise
@@ -163,6 +164,7 @@ class Meili:
         tasks = [task]
         count = 0
         batch = 0
+        current_progress = None
         async for items in data:
             batch += 1
             count += len(items)
@@ -200,11 +202,11 @@ class Meili:
                     if not event_sync:
                         return
                     if not meili_settings.insert_size and not meili_settings.insert_interval:
-                        task = await self.handle_event_for_index(index_name_tmp, event, sync)
+                        task = await self.handle_event(event, sync, index_name=index_name_tmp)
                         if task:
                             event_tasks.append(task)
-                        if progress:
-                            await progress.set(**current_progress)
+                        await self.wait_for_tasks(event_tasks)
+                        event_tasks.clear()
                     else:
                         collection.add_event(sync, event)
                         if (
@@ -213,13 +215,10 @@ class Meili:
                         ):
                             async with lock:
                                 event_tasks.extend(
-                                    await self.handle_events_for_index(index_name_tmp, collection)
+                                    await self.handle_events(collection, index_name=index_name_tmp)
                                 )
-                                if progress:
-                                    await progress.set(**current_progress)
-                else:
-                    if progress:
-                        await progress.set(**current_progress)
+                                await self.wait_for_tasks(event_tasks)
+                                event_tasks.clear()
 
             async def process_events():
                 logger.info(f"Starting to process new events for tmp index {index_name_tmp}...")
@@ -242,7 +241,7 @@ class Meili:
                         with suppress(asyncio.CancelledError):
                             await next_event_task
                     await source_iter.aclose()
-                logger.info(f"All tasks done, stopping event processing for tmp index")
+                logger.info("All tasks done, stopping event processing for tmp index")
 
             # Run both tasks concurrently, but prioritize waiting for all tasks
             await asyncio.gather(wait_for_all_tasks(), process_events())
@@ -251,13 +250,14 @@ class Meili:
             if collection.size > 0:
                 async with lock:
                     event_tasks.extend(
-                        await self.handle_events_for_index(index_name_tmp, collection)
+                        await self.handle_events(collection, index_name=index_name_tmp)
                     )
-                    if progress and current_progress:
-                        await progress.set(**current_progress)
+                    if current_progress:
+                        await self.wait_for_tasks(event_tasks)
+                        event_tasks.clear()
 
             if event_tasks:
-                await asyncio.gather(*(wait_with_sem(task.task_uid) for task in event_tasks))
+                await self.wait_for_tasks(event_tasks)
         else:
             # Original behavior: just wait for all tasks
             await asyncio.gather(*wait_tasks)
@@ -270,6 +270,8 @@ class Meili:
             timeout_in_ms=self.wait_for_task_timeout,
             interval_in_ms=self.wait_for_task_interval,
         )
+        if progress:
+            await progress.set(**current_progress or initial_progress)
         await self.client.index(index_name_tmp).delete()
         logger.success(f"Swap index {index} complete")
         return count
@@ -286,15 +288,6 @@ class Meili:
             if e.code == "index_not_found":
                 return False
             raise e
-
-    async def handle_events(self, collection: EventCollection):
-        created_events, updated_events, deleted_events = collection.pop_events
-        for sync, events in created_events.items():
-            await self.handle_events_by_type(sync, events, EventType.create)
-        for sync, events in updated_events.items():
-            await self.handle_events_by_type(sync, events, EventType.update)
-        for sync, events in deleted_events.items():
-            await self.handle_events_by_type(sync, events, EventType.delete)
 
     async def handle_plugins_pre(self, sync: Sync, event: Event):
         for plugin in self.plugins:
@@ -321,35 +314,3 @@ class Meili:
             else:
                 event = await plugin().post_event(event)
         return event
-
-    async def handle_events_by_type(self, sync: Sync, events: List[Event], event_type: EventType):
-        if not events:
-            return
-        index = self.client.index(sync.index_name)
-        for event in events:
-            await self.handle_plugins_pre(sync, event)
-        task = None
-        if event_type == EventType.create:
-            task = await index.add_documents(
-                [event.mapping_data(sync.fields) for event in events], primary_key=sync.pk
-            )
-        elif event_type == EventType.update:
-            task = await index.update_documents(
-                [event.mapping_data(sync.fields) for event in events], primary_key=sync.pk
-            )
-        elif event_type == EventType.delete:
-            task = await index.delete_documents([str(event.data[sync.pk]) for event in events])
-        for event in events:
-            await self.handle_plugins_post(sync, event)
-        return task
-
-    async def handle_event(self, event: Event, sync: Sync):
-        event = await self.handle_plugins_pre(sync, event)
-        index = self.client.index(sync.index_name)
-        if event.type == EventType.create:
-            await index.add_documents([event.mapping_data(sync.fields)], primary_key=sync.pk)
-        elif event.type == EventType.update:
-            await index.update_documents([event.mapping_data(sync.fields)], primary_key=sync.pk)
-        elif event.type == EventType.delete:
-            await index.delete_documents([str(event.data[sync.pk])])
-        await self.handle_plugins_post(sync, event)
