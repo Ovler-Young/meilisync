@@ -1,9 +1,9 @@
-from typing import List
-from bson import ObjectId
-from datetime import datetime, date
+from datetime import date, datetime
 from decimal import Decimal
+from typing import List
 
 import motor.motor_asyncio
+from bson import ObjectId
 
 from meilisync.enums import EventType, SourceType
 from meilisync.schemas import Event
@@ -45,7 +45,7 @@ class Mongo(Source):
     async def get_full_data(self, sync: Sync, size: int):
         collection = self.db[sync.table]
         if sync.fields:
-            fields = {field: sync.fields[field] for field in sync.fields}
+            fields = {field: 1 for field in sync.fields}
         else:
             fields = {}
         cursor = collection.find({}, fields)
@@ -88,10 +88,11 @@ class Mongo(Source):
                 elif operation_type == "update":
                     event_type = EventType.update
                     data = change["updateDescription"]["updatedFields"]
+                    data["_id"] = change["documentKey"]["_id"]
                 elif operation_type == "delete":
                     event_type = EventType.delete
                     data = change["documentKey"]
-                data = convert_jsonable(data) 
+                data = convert_jsonable(data)
                 yield Event(
                     type=event_type,
                     table=change["ns"]["coll"],

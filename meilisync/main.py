@@ -204,6 +204,7 @@ def refresh(
                 if not table or sync.table in table:
                     current_progress = await source.get_current_progress()
                     await progress.set(**current_progress)
+                    source.set_progress(current_progress)
                     count = await meili.refresh_data(
                         sync,
                         source.get_full_data(sync, size),

@@ -1,7 +1,7 @@
 import asyncio
 import json
 from asyncio import Queue
-from typing import List, Any
+from typing import Any, List
 
 import psycopg2
 import psycopg2.errors
@@ -63,6 +63,10 @@ class Postgres(Source):
 
         start_lsn = await asyncio.get_event_loop().run_in_executor(None, _)
         return {"start_lsn": start_lsn}
+
+    def set_progress(self, progress: dict):
+        super().set_progress(progress)
+        self.start_lsn = progress["start_lsn"]
 
     async def get_full_data(self, sync: Sync, size: int):
         if sync.fields:

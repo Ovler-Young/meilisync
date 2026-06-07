@@ -17,6 +17,9 @@ class Source:
         self.tables = tables
         self.progress = progress
 
+    def set_progress(self, progress: dict):
+        self.progress = progress
+
     async def __aiter__(self):
         raise NotImplementedError
 

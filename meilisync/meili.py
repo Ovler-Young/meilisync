@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from typing import AsyncGenerator, List, Optional, Type, Union
 
 import httpx
@@ -34,25 +35,99 @@ class Meili:
         events = [Event(type=EventType.create, data=item) for item in data]
         return await self.handle_events_by_type(sync, events, EventType.create)
 
-    async def add_data_to_temp_index(
-        self, index_name: str, pk: str, data: list, fields: dict = None
-    ):
-        """Add data directly to a specified index without using sync object."""
+    async def add_data_to_index(self, index_name: str, pk: str, data: list, fields: dict = None):
         index = self.client.index(index_name)
-        # Apply field mapping if provided (similar to Event.mapping_data behavior)
-        if fields is not None:
-            documents = []
-            for item in data:
-                mapped_item = {}
-                for k, v in item.items():
-                    if k in fields:
-                        real_k = fields[k] or k
-                        mapped_item[real_k] = v
-                documents.append(mapped_item if mapped_item else item)
-        else:
-            documents = data
+        documents = [
+            Event(type=EventType.create, data=item).mapping_data(fields)
+            for item in data
+        ]
         task = await index.add_documents(documents, primary_key=pk)
         return task
+
+    async def handle_events_by_type_for_index(
+        self,
+        index_name: str,
+        sync: Sync,
+        events: List[Event],
+        event_type: EventType,
+    ):
+        if not events:
+            return
+
+        index = self.client.index(index_name)
+        for event in events:
+            await self.handle_plugins_pre(sync, event)
+
+        task = None
+        if event_type == EventType.create:
+            task = await index.add_documents(
+                [event.mapping_data(sync.fields) for event in events], primary_key=sync.pk
+            )
+        elif event_type == EventType.update:
+            task = await index.update_documents(
+                [event.mapping_data(sync.fields) for event in events], primary_key=sync.pk
+            )
+        elif event_type == EventType.delete:
+            task = await index.delete_documents([str(event.data[sync.pk]) for event in events])
+
+        for event in events:
+            await self.handle_plugins_post(sync, event)
+        return task
+
+    async def handle_events_for_index(self, index_name: str, collection: EventCollection):
+        tasks = []
+        created_events, updated_events, deleted_events = collection.pop_events
+        for sync, events in created_events.items():
+            task = await self.handle_events_by_type_for_index(
+                index_name, sync, events, EventType.create
+            )
+            if task:
+                tasks.append(task)
+        for sync, events in updated_events.items():
+            task = await self.handle_events_by_type_for_index(
+                index_name, sync, events, EventType.update
+            )
+            if task:
+                tasks.append(task)
+        for sync, events in deleted_events.items():
+            task = await self.handle_events_by_type_for_index(
+                index_name, sync, events, EventType.delete
+            )
+            if task:
+                tasks.append(task)
+        return tasks
+
+    async def handle_event_for_index(self, index_name: str, event: Event, sync: Sync):
+        event = await self.handle_plugins_pre(sync, event)
+        index = self.client.index(index_name)
+        if event.type == EventType.create:
+            task = await index.add_documents([event.mapping_data(sync.fields)], primary_key=sync.pk)
+        elif event.type == EventType.update:
+            task = await index.update_documents(
+                [event.mapping_data(sync.fields)], primary_key=sync.pk
+            )
+        elif event.type == EventType.delete:
+            task = await index.delete_documents([str(event.data[sync.pk])])
+        else:
+            task = None
+        await self.handle_plugins_post(sync, event)
+        return task
+
+    async def wait_for_task_with_retry(self, task_uid):
+        while True:
+            try:
+                await self.client.wait_for_task(
+                    task_id=task_uid,
+                    timeout_in_ms=self.wait_for_task_timeout,
+                    interval_in_ms=self.wait_for_task_interval,
+                )
+                break
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 408:
+                    logger.debug(f"Task {task_uid} timeout (408), retrying wait...")
+                    await asyncio.sleep(1)
+                    continue
+                raise
 
     async def refresh_data(
         self,
@@ -92,28 +167,14 @@ class Meili:
             batch += 1
             count += len(items)
             logger.debug(f"Batch {batch} sending...")
-            task = await self.add_data_to_temp_index(index_name_tmp, pk, items, sync.fields)
+            task = await self.add_data_to_index(index_name_tmp, pk, items, sync.fields)
             tasks.append(task)
 
         sem = asyncio.Semaphore(3)
 
         async def wait_with_sem(task_uid):
             async with sem:
-                while True:
-                    try:
-                        await self.client.wait_for_task(
-                            task_id=task_uid,
-                            timeout_in_ms=self.wait_for_task_timeout,
-                            interval_in_ms=self.wait_for_task_interval,
-                        )
-                        break  # Task completed successfully
-                    except httpx.HTTPStatusError as e:
-                        if e.response.status_code == 408:
-                            # Request timeout means task is still running, continue waiting
-                            logger.debug(f"Task {task_uid} timeout (408), retrying wait...")
-                            await asyncio.sleep(1)  # Brief pause before retry
-                            continue
-                        raise  # Re-raise other HTTP errors
+                await self.wait_for_task_with_retry(task_uid)
 
         wait_tasks = [wait_with_sem(item.task_uid) for item in tasks]
         logger.info(f"Waiting for insert tmp index {index_name_tmp} to complete...")
@@ -122,6 +183,7 @@ class Meili:
         if source is not None and collection is not None and meili_settings is not None:
             current_progress = {}
             lock = asyncio.Lock()
+            event_tasks = []
             all_tasks_done = False
 
             async def wait_for_all_tasks():
@@ -130,33 +192,57 @@ class Meili:
                 all_tasks_done = True
                 logger.info(f"All insert tasks for tmp index {index_name_tmp} complete")
 
-            async def process_events():
+            async def process_refresh_event(event):
                 nonlocal current_progress
-                logger.info(f"Starting to process new events for tmp index {index_name_tmp}...")
-                async for event in source:
-                    if all_tasks_done:
-                        logger.info(f"All tasks done, stopping event processing for tmp index")
-                        break
-                    current_progress = event.progress
-                    if isinstance(event, Event):
-                        # Only process events for this sync
-                        event_sync = event.table == sync.table
-                        if not event_sync:
-                            continue
-                        if not meili_settings.insert_size and not meili_settings.insert_interval:
-                            await self.handle_event(event, sync)
-                            if progress:
-                                await progress.set(**current_progress)
-                        else:
-                            collection.add_event(sync, event)
-                            if collection.size >= meili_settings.insert_size:
-                                async with lock:
-                                    await self.handle_events(collection)
-                                    if progress:
-                                        await progress.set(**current_progress)
-                    else:
+                current_progress = event.progress
+                if isinstance(event, Event):
+                    event_sync = event.table == sync.table
+                    if not event_sync:
+                        return
+                    if not meili_settings.insert_size and not meili_settings.insert_interval:
+                        task = await self.handle_event_for_index(index_name_tmp, event, sync)
+                        if task:
+                            event_tasks.append(task)
                         if progress:
                             await progress.set(**current_progress)
+                    else:
+                        collection.add_event(sync, event)
+                        if (
+                            meili_settings.insert_size
+                            and collection.size >= meili_settings.insert_size
+                        ):
+                            async with lock:
+                                event_tasks.extend(
+                                    await self.handle_events_for_index(index_name_tmp, collection)
+                                )
+                                if progress:
+                                    await progress.set(**current_progress)
+                else:
+                    if progress:
+                        await progress.set(**current_progress)
+
+            async def process_events():
+                logger.info(f"Starting to process new events for tmp index {index_name_tmp}...")
+                source_iter = source.__aiter__()
+                next_event_task = asyncio.create_task(source_iter.__anext__())
+                try:
+                    while not all_tasks_done:
+                        done, _ = await asyncio.wait({next_event_task}, timeout=1)
+                        if not done:
+                            continue
+                        try:
+                            event = next_event_task.result()
+                        except StopAsyncIteration:
+                            break
+                        await process_refresh_event(event)
+                        next_event_task = asyncio.create_task(source_iter.__anext__())
+                finally:
+                    if not next_event_task.done():
+                        next_event_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await next_event_task
+                    await source_iter.aclose()
+                logger.info(f"All tasks done, stopping event processing for tmp index")
 
             # Run both tasks concurrently, but prioritize waiting for all tasks
             await asyncio.gather(wait_for_all_tasks(), process_events())
@@ -164,9 +250,14 @@ class Meili:
             # Process any remaining events in the collection
             if collection.size > 0:
                 async with lock:
-                    await self.handle_events(collection)
+                    event_tasks.extend(
+                        await self.handle_events_for_index(index_name_tmp, collection)
+                    )
                     if progress and current_progress:
                         await progress.set(**current_progress)
+
+            if event_tasks:
+                await asyncio.gather(*(wait_with_sem(task.task_uid) for task in event_tasks))
         else:
             # Original behavior: just wait for all tasks
             await asyncio.gather(*wait_tasks)
