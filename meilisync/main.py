@@ -89,8 +89,15 @@ def start(
 
     async def _():
         nonlocal current_progress
+        full_sync_progress = None
+        full_sync_performed = False
         for sync in settings.sync:
             if sync.full and not await meili.index_exists(sync.index_name):
+                if current_progress is None:
+                    current_progress = await source.get_current_progress()
+                    source.set_progress(current_progress)
+                    full_sync_progress = current_progress
+
                 # get source_count = await source.get_count(sync)
                 logger.info(f'Start full sync data from "{settings.source.type}" to MeiliSearch...')
                 source_count = await source.get_count(sync)
@@ -121,6 +128,7 @@ def start(
 
                 count = 0
                 batch = 0
+                tasks = []
                 batch_size = meili_settings.insert_size or 10000
                 target_batch_count = source_count // batch_size + 1
                 logger.info(f"Target batch count: {target_batch_count}")
@@ -128,7 +136,11 @@ def start(
                     count += len(items)
                     batch += 1
                     logger.debug(f"Batch {batch}/{target_batch_count} sending...")
-                    await meili.add_data(sync, items)
+                    task = await meili.add_data(sync, items)
+                    if task:
+                        tasks.append(task)
+                await meili.wait_for_tasks(tasks)
+                full_sync_performed = True
                 if count:
                     logger.info(
                         f'Full data sync for table "{settings.source.database}.{sync.table}" '
@@ -138,6 +150,8 @@ def start(
                     logger.info(
                         f'No data found for table "{settings.source.database}.{sync.table}".'
                     )
+        if full_sync_performed and full_sync_progress:
+            await progress.set(**full_sync_progress)
         logger.info(f'Start increment sync data from "{settings.source.type}" to MeiliSearch...')
         async for event in source:
             if settings.debug:

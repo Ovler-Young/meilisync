@@ -16,7 +16,7 @@ class EventCollection:
 
     @property
     def size(self):
-        return sum([len(events) for events in self._events.values()])
+        return len(self._ordered_events)
 
     @property
     def pop_ordered_events(self):

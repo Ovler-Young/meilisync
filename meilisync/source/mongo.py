@@ -10,6 +10,8 @@ from meilisync.schemas import Event
 from meilisync.settings import Sync
 from meilisync.source import Source
 
+CHANGE_STREAM_OPERATION_TYPES = ["insert", "update", "delete", "replace"]
+
 
 def convert_jsonable(obj):
     """Recursively convert MongoDB objects to JSON-serializable types.
@@ -31,6 +33,41 @@ def convert_jsonable(obj):
     elif isinstance(obj, dict):
         return {key: convert_jsonable(value) for key, value in obj.items()}
     return obj
+
+
+def build_change_stream_pipeline(tables: List[str]):
+    match = {"operationType": {"$in": CHANGE_STREAM_OPERATION_TYPES}}
+    if tables:
+        match["ns.coll"] = {"$in": tables}
+    return [{"$match": match}]
+
+
+def change_to_event(change: dict, resume_token: dict):
+    operation_type = change["operationType"]
+    if operation_type == "insert":
+        event_type = EventType.create
+        data = change["fullDocument"]
+    elif operation_type == "replace":
+        event_type = EventType.create
+        data = change["fullDocument"]
+    elif operation_type == "update":
+        event_type = EventType.update
+        data = dict(change["updateDescription"]["updatedFields"])
+        for field in change["updateDescription"].get("removedFields", []):
+            data[field] = None
+        data["_id"] = change["documentKey"]["_id"]
+    elif operation_type == "delete":
+        event_type = EventType.delete
+        data = change["documentKey"]
+    else:
+        raise ValueError(f"Unsupported MongoDB operation type: {operation_type}")
+
+    return Event(
+        type=event_type,
+        table=change["ns"]["coll"],
+        data=convert_jsonable(data),
+        progress=dict(resume_token=convert_jsonable(resume_token)),
+    )
 
 
 class Mongo(Source):
@@ -67,13 +104,13 @@ class Mongo(Source):
         return await self.client.admin.command("ping")
 
     async def get_current_progress(self):
-        pipeline = [{"$match": {"operationType": {"$in": ["insert", "update", "delete"]}}}]
+        pipeline = build_change_stream_pipeline(self.tables)
         async with self.db.watch(pipeline) as stream:
             raw_token = stream.resume_token
             return {"resume_token": convert_jsonable(raw_token)}
 
     async def __aiter__(self):
-        pipeline = [{"$match": {"operationType": {"$in": ["insert", "update", "delete"]}}}]
+        pipeline = build_change_stream_pipeline(self.tables)
         if self.progress:
             resume_token = self.progress["resume_token"]
         else:
@@ -81,24 +118,7 @@ class Mongo(Source):
         async with self.db.watch(pipeline, resume_after=resume_token) as stream:
             async for change in stream:
                 resume_token = convert_jsonable(stream.resume_token)
-                operation_type = change["operationType"]
-                if operation_type == "insert":
-                    event_type = EventType.create
-                    data = change["fullDocument"]
-                elif operation_type == "update":
-                    event_type = EventType.update
-                    data = change["updateDescription"]["updatedFields"]
-                    data["_id"] = change["documentKey"]["_id"]
-                elif operation_type == "delete":
-                    event_type = EventType.delete
-                    data = change["documentKey"]
-                data = convert_jsonable(data)
-                yield Event(
-                    type=event_type,
-                    table=change["ns"]["coll"],
-                    data=data,
-                    progress=dict(resume_token=resume_token),
-                )
+                yield change_to_event(change, resume_token)
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self.client.close()

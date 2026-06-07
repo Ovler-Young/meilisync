@@ -2,7 +2,6 @@ import asyncio
 from contextlib import suppress
 from typing import AsyncGenerator, List, Optional, Type, Union
 
-import httpx
 from loguru import logger
 from meilisearch_python_sdk import AsyncClient
 from meilisearch_python_sdk.errors import MeilisearchApiError
@@ -12,6 +11,11 @@ from meilisync.event import EventCollection
 from meilisync.plugin import Plugin
 from meilisync.schemas import Event
 from meilisync.settings import Sync
+
+
+def is_http_status_error(exc: Exception, status_code: int):
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == status_code
 
 
 class Meili:
@@ -35,13 +39,11 @@ class Meili:
         events = [Event(type=EventType.create, data=item) for item in data]
         return await self.handle_events_by_type(sync, events, EventType.create)
 
-    async def add_data_to_index(
-        self, index_name: str, pk: str, data: list, fields: dict | None = None
-    ):
-        index = self.client.index(index_name)
-        documents = [Event(type=EventType.create, data=item).mapping_data(fields) for item in data]
-        task = await index.add_documents(documents, primary_key=pk)
-        return task
+    async def add_data_to_index(self, index_name: str, sync: Sync, data: list):
+        events = [Event(type=EventType.create, data=item) for item in data]
+        return await self.handle_events_by_type(
+            sync, events, EventType.create, index_name=index_name
+        )
 
     async def handle_events_by_type(
         self,
@@ -55,8 +57,10 @@ class Meili:
 
         index_name = index_name or sync.index_name
         index = self.client.index(index_name)
+        processed_events = []
         for event in events:
-            await self.handle_plugins_pre(sync, event)
+            processed_events.append(await self.handle_plugins_pre(sync, event))
+        events = processed_events
 
         task = None
         if event_type == EventType.create:
@@ -112,8 +116,8 @@ class Meili:
                     interval_in_ms=self.wait_for_task_interval,
                 )
                 break
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 408:
+            except Exception as e:
+                if is_http_status_error(e, 408):
                     logger.debug(f"Task {task_uid} timeout (408), retrying wait...")
                     await asyncio.sleep(1)
                     continue
@@ -169,7 +173,7 @@ class Meili:
             batch += 1
             count += len(items)
             logger.debug(f"Batch {batch} sending...")
-            task = await self.add_data_to_index(index_name_tmp, pk, items, sync.fields)
+            task = await self.add_data_to_index(index_name_tmp, sync, items)
             tasks.append(task)
 
         sem = asyncio.Semaphore(3)
